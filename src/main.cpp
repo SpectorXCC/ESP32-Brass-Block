@@ -7,7 +7,7 @@
 #include "Adafruit_SHT31.h"
 #include "esp_sleep.h"
 #include <time.h>
-#include <SD.h> // <--- 添加：SD 卡支持
+#include <SD.h>
 
 #define SCLK 8
 #define MOSI 9
@@ -16,8 +16,8 @@
 #define OLED_CS   21
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
-#define MISO 3    // <--- 添加：SD 卡 MISO 引脚（示例）
-#define SD_CS 5   // <--- 添加：SD 卡片选引脚（示例）
+#define MISO 3
+#define SD_CS 5
 
 Adafruit_SSD1306 display(
   SCREEN_WIDTH,
