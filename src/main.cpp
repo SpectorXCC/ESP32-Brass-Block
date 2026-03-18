@@ -404,9 +404,7 @@ void setup() {
   xTaskCreate(touchTask, "TouchTask", 2048, NULL, 2, &touchTaskHandle);
   attachInterrupt(digitalPinToInterrupt(TOUCH_PIN), touchISR, RISING);
 
-  if (esp_sleep_get_wakeup_cause() != ESP_SLEEP_WAKEUP_GPIO) {
-    xTaskCreate(timeSyncTask, "TimeSync", 4096, NULL, 1, &timeSyncTaskHandle);
-  }
+  xTaskCreate(timeSyncTask, "TimeSync", 4096, NULL, 1, &timeSyncTaskHandle);
 
   // 创建传感器读取任务
   xTaskCreate(sensorTask, "SensorTask", 4096, NULL, 1, &sensorTaskHandle);
