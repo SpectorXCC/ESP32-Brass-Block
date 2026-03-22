@@ -143,18 +143,25 @@ body{ background: radial-gradient(900px 600px at 20% 10%, rgba(120,120,255,0.12)
 <script>
 async function update(){
   try{
-    const t = await (await fetch('/temp')).text();
-    const h = await (await fetch('/hum')).text();
-    const ti = await (await fetch('/time')).text();
-    const d = await (await fetch('/date')).text();
-    temp.textContent = t; hum.textContent = h;
-    time.textContent = ti; date.textContent = d;
-    t2.textContent = t; h2.textContent = h;
-    time2.textContent = ti; date2.textContent = d;
-  }catch(e){}
+    // 一次请求，获取所有数据
+    const res = await fetch('/data');
+    const data = await res.json();
+    
+    temp.textContent = data.temp; 
+    hum.textContent = data.hum;
+    time.textContent = data.time; 
+    date.textContent = data.date;
+    
+    t2.textContent = data.temp; 
+    h2.textContent = data.hum;
+    time2.textContent = data.time; 
+    date2.textContent = data.date;
+  }catch(e){
+    console.log("Fetch error", e);
+  }
 }
 update();
-setInterval(update,1000);
+setInterval(update, 1000);
 </script>
 </body>
 </html>
@@ -171,6 +178,7 @@ void IRAM_ATTR touchISR() {
 
 void enterDeepSleep() {
   detachInterrupt(digitalPinToInterrupt(TOUCH_PIN));
+
   if (displayMutex && xSemaphoreTake(displayMutex, portMAX_DELAY) == pdTRUE) {
     display.clearDisplay();
     display.setCursor(20, 25);
@@ -181,6 +189,14 @@ void enterDeepSleep() {
   }
   delay(500);
   display.ssd1306_command(SSD1306_DISPLAYOFF);
+
+  // ================= 核心修复 =================
+  // 睡前礼貌断开 Wi-Fi，让路由器释放连接状态，避免唤醒后 TCP 丢包卡顿
+  WiFi.disconnect(true);
+  WiFi.mode(WIFI_OFF);
+  delay(100); // 稍微等 100ms，确保断开帧通过天线发送出去
+  // ============================================
+
   esp_deep_sleep_enable_gpio_wakeup(1ULL << TOUCH_PIN, ESP_GPIO_WAKEUP_GPIO_HIGH);
   esp_deep_sleep_start();
 }
@@ -211,6 +227,8 @@ void ledTask(void* pvParameters) {
 }
 
 void connectWiFiAndSyncTime() {
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
   WiFi.begin(ssid, password);
   uint8_t retry = 0;
   while (WiFi.status() != WL_CONNECTED && retry < 20) {
@@ -229,10 +247,16 @@ void connectWiFiAndSyncTime() {
     // 初始化并开启 Web Server
     MDNS.begin(mdnsName);
     server.on("/", handleRoot);
-    server.on("/time", []() { server.send(200, "text/plain", getTimeString()); });
-    server.on("/date", []() { server.send(200, "text/plain", getDateString()); });
-    server.on("/temp", []() { server.send(200, "text/plain", getTempWeb()); });
-    server.on("/hum",  []() { server.send(200, "text/plain", getHumWeb()); });
+    server.on("/data", []() {
+      // 拼接 JSON 格式数据
+      String json = "{";
+      json += "\"temp\":\"" + getTempWeb() + "\",";
+      json += "\"hum\":\"" + getHumWeb() + "\",";
+      json += "\"time\":\"" + getTimeString() + "\",";
+      json += "\"date\":\"" + getDateString() + "\"";
+      json += "}";
+      server.send(200, "application/json", json);
+    });
     server.begin();
     
     if (displayMutex && xSemaphoreTake(displayMutex, portMAX_DELAY) == pdTRUE) {
@@ -270,7 +294,7 @@ void webServerTask(void* pvParameters) {
     if (WiFi.status() == WL_CONNECTED) {
       server.handleClient();
     }
-    vTaskDelay(pdMS_TO_TICKS(20)); // 让出 CPU 避免 Watchdog 复位，保持系统流畅
+    vTaskDelay(pdMS_TO_TICKS(2)); // 让出 CPU 避免 Watchdog 复位，保持系统流畅
   }
 }
 
