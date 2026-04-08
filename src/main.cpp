@@ -209,6 +209,11 @@ body{ background: radial-gradient(900px 600px at 20% 10%, rgba(120,120,255,0.12)
 .kv{ display:flex; justify-content:space-between; padding:10px 12px; margin-top:10px; border-radius:14px; background: rgba(255,255,255,0.04); border:1px solid var(--border); }
 .k{ color:var(--muted); } .v{ font-weight:600; opacity:.9; }
 .footer{ margin-top:14px; font-size:.9rem; color:var(--muted); }
+
+/* 新增样式 */
+.v-input { background:none; border:none; border-bottom:1px solid var(--border); color:white; width:50px; text-align:right; font-weight:600; outline:none; }
+#btn-save { margin-top:15px; width:100%; padding:10px; border-radius:12px; background:rgba(255,255,255,0.1); color:white; border:1px solid var(--border); cursor:pointer; transition:0.3s; }
+#btn-save:hover { background:rgba(255,255,255,0.2); }
 </style>
 </head>
 <body>
@@ -221,37 +226,70 @@ body{ background: radial-gradient(900px 600px at 20% 10%, rgba(120,120,255,0.12)
       <div class="time" id="time">--:--:--</div>
       <div class="date" id="date"></div>
     </div>
+
+    <!-- 右侧面板已被替换为：预设中心（Setup） -->
     <div class="panel">
-      <div class="title">实时详细数据</div>
-      <div class="kv"><div class="k">温度</div><div class="v" id="t2"></div></div>
-      <div class="kv"><div class="k">湿度</div><div class="v" id="h2"></div></div>
-      <div class="kv"><div class="k">时间</div><div class="v" id="time2"></div></div>
-      <div class="kv"><div class="k">日期</div><div class="v" id="date2"></div></div>
+      <div class="title">预设中心 (Setup)</div>
+      <div style="margin-top:10px;">
+        <div class="kv"><div class="k">温度上限</div><input type="number" id="in_th" class="v-input"></div>
+        <div class="kv"><div class="k">温度下限</div><input type="number" id="in_tl" class="v-input"></div>
+        <div class="kv"><div class="k">湿度上限</div><input type="number" id="in_hh" class="v-input"></div>
+        <div class="kv"><div class="k">湿度下限</div><input type="number" id="in_hl" class="v-input"></div>
+        <button onclick="save()" id="btn-save">应用更改</button>
+      </div>
     </div>
+
   </div>
 </div>
+
 <script>
+let firstLoad = true;
+
 async function update(){
   try{
-    // 一次请求，获取所有数据
     const res = await fetch('/data');
-    const data = await res.json();
-    
-    temp.textContent = data.temp; 
-    hum.textContent = data.hum;
-    time.textContent = data.time; 
-    date.textContent = data.date;
-    
-    t2.textContent = data.temp; 
-    h2.textContent = data.hum;
-    time2.textContent = data.time; 
-    date2.textContent = data.date;
+    const d = await res.json();
+
+    // 主面板显示
+    const elTemp = document.getElementById('temp');
+    const elHum = document.getElementById('hum');
+    const elTime = document.getElementById('time');
+    const elDate = document.getElementById('date');
+    if(elTemp) elTemp.textContent = d.temp;
+    if(elHum) elHum.textContent = d.hum;
+    if(elTime) elTime.textContent = d.time;
+    if(elDate) elDate.textContent = d.date;
+
+    // 首次加载时填充输入框（阈值）
+    if(firstLoad){
+      if (d.tH !== undefined) document.getElementById('in_th').value = d.tH;
+      if (d.tL !== undefined) document.getElementById('in_tl').value = d.tL;
+      if (d.hH !== undefined) document.getElementById('in_hh').value = d.hH;
+      if (d.hL !== undefined) document.getElementById('in_hl').value = d.hL;
+      firstLoad = false;
+    }
   }catch(e){
     console.log("Fetch error", e);
   }
 }
+
+async function save(){
+  const th = document.getElementById('in_th').value;
+  const tl = document.getElementById('in_tl').value;
+  const hh = document.getElementById('in_hh').value;
+  const hl = document.getElementById('in_hl').value;
+  
+  const btn = document.getElementById('btn-save');
+  btn.textContent = "保存中...";
+  
+  await fetch(`/set?th=${encodeURIComponent(th)}&tl=${encodeURIComponent(tl)}&hh=${encodeURIComponent(hh)}&hl=${encodeURIComponent(hl)}`);
+  
+  btn.textContent = "已应用 ✓";
+  setTimeout(() => { btn.textContent = "应用更改"; }, 2000);
+}
+
 update();
-setInterval(update, 1000);
+setInterval(update, 2000);
 </script>
 </body>
 </html>
@@ -377,9 +415,23 @@ void connectWiFiAndSyncTime() {
       json += "\"temp\":\"" + getTempWeb() + "\",";
       json += "\"hum\":\"" + getHumWeb() + "\",";
       json += "\"time\":\"" + getTimeString() + "\",";
-      json += "\"date\":\"" + getDateString() + "\"";
+      json += "\"date\":\"" + getDateString() + "\",";
+      json += "\"tH\":" + String(threshHighT, 1) + ",";
+      json += "\"tL\":" + String(threshLowT, 1) + ",";
+      json += "\"hH\":" + String(threshHighH, 1) + ",";
+      json += "\"hL\":" + String(threshLowH, 1);
       json += "}";
       server.send(200, "application/json", json);
+    });
+
+    // 新增 /set 路径，接收网页发来的新参数
+    server.on("/set", HTTP_GET, []() {
+      if (server.hasArg("th")) threshHighT = server.arg("th").toFloat();
+      if (server.hasArg("tl")) threshLowT  = server.arg("tl").toFloat();
+      if (server.hasArg("hh")) threshHighH = server.arg("hh").toFloat();
+      if (server.hasArg("hl")) threshLowH  = server.arg("hl").toFloat();
+      
+      server.send(200, "text/plain", "OK");
     });
     server.begin();
     
