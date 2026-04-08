@@ -29,7 +29,11 @@
 #define TOUCH_PIN 1 // TTP223 触摸引脚
 #define LED_PIN 7
 
-#define ALARM_TEMP 50.0f // 温度报警阈值
+// 报警阈值（全局变量，可在 Web 端修改）
+float threshHighT = 50.0;
+float threshLowT  = 0.0;
+float threshHighH = 80.0;
+float threshLowH  = 30.0;
 
 // ================== WiFi & NTP ==================
 const char* ssid     = "EiHei-WiFi";
@@ -428,7 +432,9 @@ void sensorTask(void* pvParameters) {
     if (!isnan(t) && !isnan(h)) {
         globalTemp = t;
         globalHum = h;
-        alarmActive = (t > ALARM_TEMP); 
+        // 全维度报警判断：任一条件不满足即触发
+        alarmActive = (t > threshHighT || t < threshLowT || 
+                  h > threshHighH || h < threshLowH);
 
         // 核心更新：将数据推入数据分析的环形缓冲区
         tempHistory[bufferIndex] = t;
