@@ -205,10 +205,41 @@ void enterDeepSleep() {
 
 void touchTask(void* pvParameters) {
   for (;;) {
+    // 阻塞等待 ISR 的通知
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-    delay(20);
-    while (digitalRead(TOUCH_PIN) == HIGH) vTaskDelay(pdMS_TO_TICKS(10));
-    enterDeepSleep();
+    vTaskDelay(pdMS_TO_TICKS(20)); // 简单防抖
+
+    if (digitalRead(TOUCH_PIN) == HIGH) {
+      uint32_t pressTime = millis();
+      bool isLongPress = false;
+
+      // 只要手指还按着，就在循环里计时
+      while (digitalRead(TOUCH_PIN) == HIGH) {
+        if (millis() - pressTime > 1500) { // 设定长按时间为 1.5 秒
+          isLongPress = true;
+          break; // 确认是长按，跳出循环
+        }
+        vTaskDelay(pdMS_TO_TICKS(20)); // 让出 CPU 避免看门狗复位
+      }
+
+      if (isLongPress) {
+        // 【长按逻辑】
+        // 必须等待手指完全松开再进入深度休眠！
+        // 否则刚进入休眠，引脚还是高电平，芯片瞬间又被唤醒了
+        while (digitalRead(TOUCH_PIN) == HIGH) {
+          vTaskDelay(pdMS_TO_TICKS(50));
+        }
+        enterDeepSleep();
+      } else {
+        // 【短按逻辑】
+        // 如果按下的时间不足 1.5 秒，代码会走到这里
+        // 未来你可以在这里扩展功能，比如：
+        // Serial.println("检测到短按！切换屏幕或取消报警...");
+      }
+    }
+    
+    // 清理期间可能堆积的冗余中断通知
+    xTaskNotifyStateClear(NULL);
   }
 }
 
@@ -411,7 +442,40 @@ void setup() {
       xSemaphoreGive(displayMutex);
     }
     pinMode(TOUCH_PIN, INPUT_PULLDOWN);
-    while(digitalRead(TOUCH_PIN) == HIGH) delay(10);
+
+    if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_GPIO) {
+      // 【伪长按唤醒判断】
+      uint32_t wakeTime = millis();
+      bool validWakeup = true;
+      
+      // 芯片已经被瞬间唤醒，但我们需要确认用户是不是长按了 1.5 秒
+      while (millis() - wakeTime < 1500) { 
+        if (digitalRead(TOUCH_PIN) == LOW) {
+          validWakeup = false; // 手指提前离开了，是误触或短按
+          break; 
+        }
+        delay(20);
+      }
+
+      if (!validWakeup) {
+        // 如果不是长按，不点亮屏幕，直接重新进入深度休眠
+        esp_deep_sleep_enable_gpio_wakeup(1ULL << TOUCH_PIN, ESP_GPIO_WAKEUP_GPIO_HIGH);
+        esp_deep_sleep_start();
+      }
+
+      // 走到这里说明长按达标了，正常显示开机画面
+      if (xSemaphoreTake(displayMutex, portMAX_DELAY) == pdTRUE) {
+        display.clearDisplay();
+        display.setCursor(10, 20);
+        display.setTextSize(1);
+        display.println("Waking up...");
+        display.display();
+        xSemaphoreGive(displayMutex);
+      }
+      
+      // 同样，等待手指松开，以免刚开机就误触发了 touchTask 里的事件
+      while(digitalRead(TOUCH_PIN) == HIGH) delay(10);
+    }
   }
 
   if (!sht31.begin(SHT31_ADDR)) {
