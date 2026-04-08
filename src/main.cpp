@@ -29,7 +29,7 @@
 #define TOUCH_PIN 1 // TTP223 触摸引脚
 #define LED_PIN 7
 
-#define ALARM_TEMP 30.0f // 温度报警阈值
+#define ALARM_TEMP 50.0f // 温度报警阈值
 
 // ================== WiFi & NTP ==================
 const char* ssid     = "EiHei-WiFi";
@@ -40,12 +40,11 @@ const char* ntpServer = "ntp2.aliyun.com";
 const long gmtOffset_sec = 8 * 3600; // UTC+8
 const int daylightOffset_sec = 0;
 
-// ================== 全局对象 ==================
+// ================== 全局对象与 FreeRTOS 句柄 ==================
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &SPI, OLED_DC, OLED_RES, OLED_CS);
 Adafruit_SHT31 sht31;
 WebServer server(80);
 
-// FreeRTOS 句柄
 TaskHandle_t sensorTaskHandle = NULL;
 TaskHandle_t timeSyncTaskHandle = NULL;
 TaskHandle_t touchTaskHandle = NULL;
@@ -53,7 +52,7 @@ TaskHandle_t ledTaskHandle = NULL;
 TaskHandle_t webTaskHandle = NULL;
 SemaphoreHandle_t displayMutex = NULL;
 
-// 状态与数据全局变量 (用于任务间通信)
+// 状态与数据全局变量
 volatile bool alarmActive = false;
 bool sdInitialized = false;
 bool logStarted = false;
@@ -61,6 +60,93 @@ String logFileName = "";
 
 float globalTemp = NAN;
 float globalHum = NAN;
+
+// ================== 数据分析缓冲区与显示模式 ==================
+enum DisplayMode { REALTIME_MODE, ANALYSIS_MODE };
+volatile DisplayMode currentMode = REALTIME_MODE;
+
+#define BUFFER_SIZE 60 // 存储过去60次采样（即过去60秒的数据）
+float tempHistory[BUFFER_SIZE];
+float humHistory[BUFFER_SIZE];
+int bufferIndex = 0;
+bool bufferFull = false;
+
+// ================== 屏幕显示绘制函数 ==================
+void drawRealTimePage(float t, float h, const char* hhmm) {
+  display.clearDisplay();
+  display.drawRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, SSD1306_WHITE);
+  display.setCursor(90, 10);
+  display.setTextSize(1);
+  display.print(hhmm);
+  
+  display.setCursor(10, 10);
+  display.setTextSize(1);
+  display.print("TEMP:");
+  display.setCursor(10, 22);
+  display.setTextSize(2);
+  display.print(t, 1); display.print(" C");
+  
+  display.setCursor(10, 42);
+  display.setTextSize(1);
+  display.print("HUMIDITY:");
+  display.setCursor(70, 42);
+  display.print(h, 1); display.print("%");
+  
+  display.display();
+}
+
+void drawAnalysisPage() {
+  int count = bufferFull ? BUFFER_SIZE : bufferIndex;
+  
+  // 如果刚刚开机，还没有收集到数据
+  if (count == 0) {
+    display.clearDisplay();
+    display.drawRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, SSD1306_WHITE);
+    display.setCursor(15, 28);
+    display.setTextSize(1);
+    display.print("Collecting Data...");
+    display.display();
+    return;
+  }
+
+  float maxT = -99.0, minT = 99.0, sumT = 0;
+  float maxH = -99.0, minH = 99.0, sumH = 0;
+
+  // 遍历缓冲区计算极值和总和
+  for (int i = 0; i < count; i++) {
+    if (tempHistory[i] > maxT) maxT = tempHistory[i];
+    if (tempHistory[i] < minT) minT = tempHistory[i];
+    sumT += tempHistory[i];
+
+    if (humHistory[i] > maxH) maxH = humHistory[i];
+    if (humHistory[i] < minH) minH = humHistory[i];
+    sumH += humHistory[i];
+  }
+  
+  float avgT = sumT / count;
+  float avgH = sumH / count;
+
+  display.clearDisplay();
+  display.setTextSize(1);
+  
+  // 标题
+  display.setCursor(8, 2);
+  display.println("--- 60s ANALYSIS ---");
+
+  // 温度统计
+  display.setCursor(0, 18);
+  display.printf("T-Max:%.1f Min:%.1f", maxT, minT);
+  display.setCursor(0, 30);
+  display.printf("T-Avg:%.1f C", avgT);
+
+  // 湿度统计
+  display.setCursor(0, 44);
+  display.printf("H-Max:%.1f Min:%.1f", maxH, minH);
+  display.setCursor(0, 56);
+  display.printf("H-Avg:%.1f %%", avgH);
+
+  display.display();
+}
 
 // ================== WebServer 响应函数 ==================
 String getTimeString() {
@@ -190,12 +276,10 @@ void enterDeepSleep() {
   delay(500);
   display.ssd1306_command(SSD1306_DISPLAYOFF);
 
-  // ================= 核心修复 =================
   // 睡前礼貌断开 Wi-Fi，让路由器释放连接状态，避免唤醒后 TCP 丢包卡顿
   WiFi.disconnect(true);
   WiFi.mode(WIFI_OFF);
-  delay(100); // 稍微等 100ms，确保断开帧通过天线发送出去
-  // ============================================
+  delay(100); 
 
   esp_deep_sleep_enable_gpio_wakeup(1ULL << TOUCH_PIN, ESP_GPIO_WAKEUP_GPIO_HIGH);
   esp_deep_sleep_start();
@@ -205,7 +289,6 @@ void enterDeepSleep() {
 
 void touchTask(void* pvParameters) {
   for (;;) {
-    // 阻塞等待 ISR 的通知
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
     vTaskDelay(pdMS_TO_TICKS(20)); // 简单防抖
 
@@ -213,32 +296,40 @@ void touchTask(void* pvParameters) {
       uint32_t pressTime = millis();
       bool isLongPress = false;
 
-      // 只要手指还按着，就在循环里计时
       while (digitalRead(TOUCH_PIN) == HIGH) {
         if (millis() - pressTime > 1500) { // 设定长按时间为 1.5 秒
           isLongPress = true;
-          break; // 确认是长按，跳出循环
+          break; 
         }
         vTaskDelay(pdMS_TO_TICKS(20)); // 让出 CPU 避免看门狗复位
       }
 
       if (isLongPress) {
-        // 【长按逻辑】
-        // 必须等待手指完全松开再进入深度休眠！
-        // 否则刚进入休眠，引脚还是高电平，芯片瞬间又被唤醒了
+        // 【长按逻辑：休眠】
         while (digitalRead(TOUCH_PIN) == HIGH) {
           vTaskDelay(pdMS_TO_TICKS(50));
         }
         enterDeepSleep();
       } else {
-        // 【短按逻辑】
-        // 如果按下的时间不足 1.5 秒，代码会走到这里
-        // 未来你可以在这里扩展功能，比如：
-        // Serial.println("检测到短按！切换屏幕或取消报警...");
+        // 【短按逻辑：切换页面】
+        currentMode = (currentMode == REALTIME_MODE) ? ANALYSIS_MODE : REALTIME_MODE;
+        
+        // 强制立即刷新屏幕，提供更快的触觉反馈
+        if (displayMutex && xSemaphoreTake(displayMutex, portMAX_DELAY) == pdTRUE) {
+            if (currentMode == ANALYSIS_MODE) {
+                drawAnalysisPage();
+            } else {
+                display.clearDisplay();
+                display.setCursor(20, 28);
+                display.setTextSize(1);
+                display.print("Loading UI...");
+                display.display();
+                // 具体的实时数据将在 sensorTask 下一个1秒周期内迅速画出
+            }
+            xSemaphoreGive(displayMutex);
+        }
       }
     }
-    
-    // 清理期间可能堆积的冗余中断通知
     xTaskNotifyStateClear(NULL);
   }
 }
@@ -275,11 +366,9 @@ void connectWiFiAndSyncTime() {
   if (WiFi.status() == WL_CONNECTED) {
     configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
     
-    // 初始化并开启 Web Server
     MDNS.begin(mdnsName);
     server.on("/", handleRoot);
     server.on("/data", []() {
-      // 拼接 JSON 格式数据
       String json = "{";
       json += "\"temp\":\"" + getTempWeb() + "\",";
       json += "\"hum\":\"" + getHumWeb() + "\",";
@@ -296,7 +385,6 @@ void connectWiFiAndSyncTime() {
       xSemaphoreGive(displayMutex);
     }
     
-    // 等待时间同步
     time_t now = 0;
     int retryTime = 0;
     while ((now = time(NULL)) < 1000000000 && retryTime < 20) {
@@ -316,16 +404,15 @@ void connectWiFiAndSyncTime() {
 
 void timeSyncTask(void* pvParameters) {
   connectWiFiAndSyncTime();
-  vTaskDelete(NULL); // 运行一次后删除自身，释放内存
+  vTaskDelete(NULL); 
 }
 
-// Web Server 处理任务
 void webServerTask(void* pvParameters) {
   for (;;) {
     if (WiFi.status() == WL_CONNECTED) {
       server.handleClient();
     }
-    vTaskDelay(pdMS_TO_TICKS(2)); // 让出 CPU 避免 Watchdog 复位，保持系统流畅
+    vTaskDelay(pdMS_TO_TICKS(2)); 
   }
 }
 
@@ -341,9 +428,19 @@ void sensorTask(void* pvParameters) {
     if (!isnan(t) && !isnan(h)) {
         globalTemp = t;
         globalHum = h;
-        alarmActive = (t > ALARM_TEMP); // 简单的温度报警
+        alarmActive = (t > ALARM_TEMP); 
+
+        // 核心更新：将数据推入数据分析的环形缓冲区
+        tempHistory[bufferIndex] = t;
+        humHistory[bufferIndex] = h;
+        bufferIndex++;
+        if (bufferIndex >= BUFFER_SIZE) {
+            bufferIndex = 0;
+            bufferFull = true;
+        }
     }
 
+    // 时间处理与 SD 卡写入逻辑保持不变...
     time_t now = time(NULL);
     struct tm timeinfo;
     char timeStamp[20] = "--:--:--";
@@ -374,40 +471,26 @@ void sensorTask(void* pvParameters) {
       }
     }
 
-    if (sdInitialized && logStarted) {
+    if (sdInitialized && logStarted && !isnan(t) && !isnan(h)) {
       File f = SD.open(logFileName.c_str(), FILE_APPEND);
       if (f) {
         f.print(timeStamp); f.print(",");
-        if (!isnan(t)) f.print(t, 1); else f.print("NaN"); f.print(",");
-        if (!isnan(h)) f.print(h, 1); else f.print("NaN"); f.println();
+        f.print(t, 1); f.print(",");
+        f.print(h, 1); f.println();
         f.close();
       }
     }
 
+    // 根据当前模式更新屏幕
     if (!isnan(t) && !isnan(h)) {
       if (displayMutex && xSemaphoreTake(displayMutex, portMAX_DELAY) == pdTRUE) {
-        display.clearDisplay();
-        display.drawRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, SSD1306_WHITE);
-        display.setCursor(90, 10);
-        display.setTextSize(1);
-        display.print(hhmm);
-        display.setCursor(10, 10);
-        display.setTextSize(1);
-        display.print("TEMP:");
-        display.setCursor(10, 22);
-        display.setTextSize(2);
-        display.print(t, 1); display.print(" C");
-        display.setCursor(10, 42);
-        display.setTextSize(1);
-        display.print("HUMIDITY:");
-        display.setCursor(70, 42);
-        display.print(h, 1); display.print("%");
-        display.display();
+        if (currentMode == REALTIME_MODE) {
+          drawRealTimePage(t, h, hhmm);
+        } else if (currentMode == ANALYSIS_MODE) {
+          drawAnalysisPage();
+        }
         xSemaphoreGive(displayMutex);
       }
-
-      // 串口输出
-      //Serial.printf("%s, Temp: %.1f C, Humidity: %.1f%%\n", timeStamp, t, h);
     }
   }
 }
@@ -432,7 +515,29 @@ void setup() {
 
   displayMutex = xSemaphoreCreateMutex();
 
+  // 修复后的深度休眠唤醒逻辑
   if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_GPIO) {
+    pinMode(TOUCH_PIN, INPUT_PULLDOWN);
+
+    uint32_t wakeTime = millis();
+    bool validWakeup = true;
+    
+    // 伪长按确认机制 (1.5秒)
+    while (millis() - wakeTime < 1500) { 
+      if (digitalRead(TOUCH_PIN) == LOW) {
+        validWakeup = false; 
+        break; 
+      }
+      delay(20);
+    }
+
+    if (!validWakeup) {
+      // 误触则立刻滚回去继续睡
+      esp_deep_sleep_enable_gpio_wakeup(1ULL << TOUCH_PIN, ESP_GPIO_WAKEUP_GPIO_HIGH);
+      esp_deep_sleep_start();
+    }
+
+    // 确认是人为长按唤醒，显示启动画面
     if (xSemaphoreTake(displayMutex, portMAX_DELAY) == pdTRUE) {
       display.clearDisplay();
       display.setCursor(10, 20);
@@ -441,41 +546,9 @@ void setup() {
       display.display();
       xSemaphoreGive(displayMutex);
     }
-    pinMode(TOUCH_PIN, INPUT_PULLDOWN);
-
-    if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_GPIO) {
-      // 【伪长按唤醒判断】
-      uint32_t wakeTime = millis();
-      bool validWakeup = true;
-      
-      // 芯片已经被瞬间唤醒，但我们需要确认用户是不是长按了 1.5 秒
-      while (millis() - wakeTime < 1500) { 
-        if (digitalRead(TOUCH_PIN) == LOW) {
-          validWakeup = false; // 手指提前离开了，是误触或短按
-          break; 
-        }
-        delay(20);
-      }
-
-      if (!validWakeup) {
-        // 如果不是长按，不点亮屏幕，直接重新进入深度休眠
-        esp_deep_sleep_enable_gpio_wakeup(1ULL << TOUCH_PIN, ESP_GPIO_WAKEUP_GPIO_HIGH);
-        esp_deep_sleep_start();
-      }
-
-      // 走到这里说明长按达标了，正常显示开机画面
-      if (xSemaphoreTake(displayMutex, portMAX_DELAY) == pdTRUE) {
-        display.clearDisplay();
-        display.setCursor(10, 20);
-        display.setTextSize(1);
-        display.println("Waking up...");
-        display.display();
-        xSemaphoreGive(displayMutex);
-      }
-      
-      // 同样，等待手指松开，以免刚开机就误触发了 touchTask 里的事件
-      while(digitalRead(TOUCH_PIN) == HIGH) delay(10);
-    }
+    
+    // 等待手指松开
+    while(digitalRead(TOUCH_PIN) == HIGH) delay(10);
   }
 
   if (!sht31.begin(SHT31_ADDR)) {
@@ -493,11 +566,7 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(TOUCH_PIN), touchISR, RISING);
 
   xTaskCreate(timeSyncTask, "TimeSync", 4096, NULL, 1, &timeSyncTaskHandle);
-
-  // 创建传感器读取任务
   xTaskCreate(sensorTask, "SensorTask", 4096, NULL, 1, &sensorTaskHandle);
-  
-  // 创建 WebServer 守护任务
   xTaskCreate(webServerTask, "WebTask", 4096, NULL, 1, &webTaskHandle);
 }
 
