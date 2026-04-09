@@ -37,7 +37,7 @@ float threshLowH  = 30.0;
 // ================== WiFi & NTP ==================
 const char* ssid     = "EiHei-WiFi";
 const char* password = "19896664";
-const char* mdnsName = "myhome"; // 局域网访问地址: myhome.local
+//const char* mdnsName = "myhome"; // 局域网访问地址: myhome.local
 
 const char* ntpServer = "ntp2.aliyun.com";
 const long gmtOffset_sec = 8 * 3600; // UTC+8
@@ -393,7 +393,7 @@ void touchTask(void* pvParameters) {
         if (isLowPowerMode) {
           // 如果处于休眠状态，短按直接唤醒
           exitLowPower();
-          Serial.println(">>> 手动触摸唤醒");
+          //Serial.println(">>> 手动触摸唤醒");
         } else {
           // 如果已经是清醒状态，短按切换显示模式
           currentMode = (currentMode == REALTIME_MODE) ? ANALYSIS_MODE : REALTIME_MODE;
@@ -445,7 +445,7 @@ void connectWiFiAndSyncTime() {
   if (WiFi.status() == WL_CONNECTED) {
     configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
     
-    MDNS.begin(mdnsName);
+    //MDNS.begin(mdnsName);
     server.on("/", handleRoot);
     server.on("/data", []() {
       String json = "{";
@@ -573,20 +573,19 @@ void sensorTask(void* pvParameters) {
     }
 
     // SD 卡文件创建（使用 epoch 秒命名文件）和写入
-    if (sdInitialized && !logStarted) {
-      char fname[32];
-      if (now >= 1000000000) {
-        snprintf(fname, sizeof(fname), "/log_%lu.csv", (unsigned long)now);
-      } else {
-        snprintf(fname, sizeof(fname), "/log_%lu.csv", (unsigned long)millis());
-      }
-      logFileName = String(fname);
-      File f = SD.open(logFileName.c_str(), FILE_WRITE);
-      if (f) {
-        f.println("timestamp,temperature,humidity");
-        f.close();
-        logStarted = true;
-      }
+    if (sdInitialized && !logStarted && now >= 1000000000) {
+        char fname[32];
+        // 严格使用 Epoch 秒命名
+        snprintf(fname, sizeof(fname), "/%lu.csv", (unsigned long)now);
+        
+        logFileName = String(fname);
+        File f = SD.open(logFileName.c_str(), FILE_WRITE);
+        if (f) {
+            f.println("timestamp,temperature,humidity");
+            f.close();
+            logStarted = true; 
+            //Serial.printf("SD卡记录启动，文件名: %s\n", fname);
+        }
     }
 
     if (sdInitialized && logStarted && !isnan(t) && !isnan(h)) {
