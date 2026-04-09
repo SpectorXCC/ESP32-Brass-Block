@@ -5,7 +5,6 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include "Adafruit_SHT31.h"
-#include "esp_sleep.h"
 #include <time.h>
 #include <SD.h>
 #include <WebServer.h>
@@ -58,6 +57,7 @@ SemaphoreHandle_t displayMutex = NULL;
 
 // 状态与数据全局变量
 volatile bool alarmActive = false;
+volatile bool isLowPowerMode = false; // 新增：软休眠状态标志位
 bool sdInitialized = false;
 bool logStarted = false;
 String logFileName = "";
@@ -69,11 +69,17 @@ float globalHum = NAN;
 enum DisplayMode { REALTIME_MODE, ANALYSIS_MODE };
 volatile DisplayMode currentMode = REALTIME_MODE;
 
-#define BUFFER_SIZE 60 // 存储过去60次采样（即过去60秒的数据）
+#define BUFFER_SIZE 60 // 存储过去60次采样
 float tempHistory[BUFFER_SIZE];
 float humHistory[BUFFER_SIZE];
 int bufferIndex = 0;
 bool bufferFull = false;
+
+// ================== 自动休眠逻辑变量 ==================
+float lastStableTemp = 0.0;
+float lastStableHum = 0.0;
+unsigned long lastChangeTime = 0; 
+const unsigned long AUTO_SLEEP_TIMEOUT = 30000; // 30秒无变化则休眠
 
 // ================== 屏幕显示绘制函数 ==================
 void drawRealTimePage(float t, float h, const char* hhmm) {
@@ -102,7 +108,6 @@ void drawRealTimePage(float t, float h, const char* hhmm) {
 void drawAnalysisPage() {
   int count = bufferFull ? BUFFER_SIZE : bufferIndex;
   
-  // 如果刚刚开机，还没有收集到数据
   if (count == 0) {
     display.clearDisplay();
     display.drawRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, SSD1306_WHITE);
@@ -116,7 +121,6 @@ void drawAnalysisPage() {
   float maxT = -99.0, minT = 99.0, sumT = 0;
   float maxH = -99.0, minH = 99.0, sumH = 0;
 
-  // 遍历缓冲区计算极值和总和
   for (int i = 0; i < count; i++) {
     if (tempHistory[i] > maxT) maxT = tempHistory[i];
     if (tempHistory[i] < minT) minT = tempHistory[i];
@@ -133,17 +137,14 @@ void drawAnalysisPage() {
   display.clearDisplay();
   display.setTextSize(1);
   
-  // 标题
   display.setCursor(8, 2);
   display.println("--- 60s ANALYSIS ---");
 
-  // 温度统计
   display.setCursor(0, 18);
   display.printf("T-Max:%.1f Min:%.1f", maxT, minT);
   display.setCursor(0, 30);
   display.printf("T-Avg:%.1f C", avgT);
 
-  // 湿度统计
   display.setCursor(0, 44);
   display.printf("H-Max:%.1f Min:%.1f", maxH, minH);
   display.setCursor(0, 56);
@@ -200,17 +201,15 @@ body{ background: radial-gradient(900px 600px at 20% 10%, rgba(120,120,255,0.12)
 .wrap{ height:100%; display:grid; place-items:center; padding:24px; }
 .card{ width:min(880px,100%); display:grid; grid-template-columns: 1.2fr 0.8fr; gap:16px; padding:18px; border-radius:24px; background: linear-gradient(180deg,var(--glass2),var(--glass)); border:1px solid var(--border); backdrop-filter: blur(10px); }
 @media(max-width:820px){ .card{grid-template-columns:1fr;} }
-.panel{ padding:18px; border-radius:18px; background: rgba(255,255,255,0.04); border:1px solid var(--border); }
+.panel{ padding:18px; border-radius:18px; background: rgba(255,255,255,0.04); border:1px solid var(--border); transition: 0.3s; }
 .title{ font-size:.85rem; letter-spacing:.08em; text-transform:uppercase; color:var(--muted); }
-.temp{ margin-top:10px; font-size:clamp(4.2rem,9vw,6.8rem); font-weight:700; opacity:.92; }
-.chip{ display:inline-block; margin-top:12px; padding:8px 12px; border-radius:999px; font-weight:600; background: rgba(255,255,255,0.05); border:1px solid var(--border); opacity:.85; }
-.time{ margin-top:14px; font-size:clamp(2.1rem,5vw,3rem); font-weight:600; opacity:.85; }
+.temp{ margin-top:10px; font-size:clamp(4.2rem,9vw,6.8rem); font-weight:700; opacity:.92; transition: 0.3s; }
+.chip{ display:inline-block; margin-top:12px; padding:8px 12px; border-radius:999px; font-weight:600; background: rgba(255,255,255,0.05); border:1px solid var(--border); opacity:.85; transition: 0.3s; }
+.time{ margin-top:14px; font-size:clamp(2.1rem,5vw,3rem); font-weight:600; opacity:.85; transition: 0.3s; }
 .date{ margin-top:8px; font-size:1rem; color:var(--muted); }
 .kv{ display:flex; justify-content:space-between; padding:10px 12px; margin-top:10px; border-radius:14px; background: rgba(255,255,255,0.04); border:1px solid var(--border); }
 .k{ color:var(--muted); } .v{ font-weight:600; opacity:.9; }
 .footer{ margin-top:14px; font-size:.9rem; color:var(--muted); }
-
-/* 新增样式 */
 .v-input { background:none; border:none; border-bottom:1px solid var(--border); color:white; width:50px; text-align:right; font-weight:600; outline:none; }
 #btn-save { margin-top:15px; width:100%; padding:10px; border-radius:12px; background:rgba(255,255,255,0.1); color:white; border:1px solid var(--border); cursor:pointer; transition:0.3s; }
 #btn-save:hover { background:rgba(255,255,255,0.2); }
@@ -219,7 +218,7 @@ body{ background: radial-gradient(900px 600px at 20% 10%, rgba(120,120,255,0.12)
 <body>
 <div class="wrap">
   <div class="card">
-    <div class="panel">
+    <div class="panel" id="main-panel">
       <div class="title">室内环境监测系统</div>
       <div class="temp" id="temp">--.- °C</div>
       <div class="chip" id="hum">--.- %RH</div>
@@ -227,7 +226,6 @@ body{ background: radial-gradient(900px 600px at 20% 10%, rgba(120,120,255,0.12)
       <div class="date" id="date"></div>
     </div>
 
-    <!-- 右侧面板已被替换为：预设中心（Setup） -->
     <div class="panel">
       <div class="title">预设中心 (Setup)</div>
       <div style="margin-top:10px;">
@@ -250,23 +248,30 @@ async function update(){
     const res = await fetch('/data');
     const d = await res.json();
 
-    // 主面板显示
     const elTemp = document.getElementById('temp');
     const elHum = document.getElementById('hum');
     const elTime = document.getElementById('time');
     const elDate = document.getElementById('date');
-    if(elTemp) elTemp.textContent = d.temp;
-    if(elHum) elHum.textContent = d.hum;
-    if(elTime) elTime.textContent = d.time;
-    if(elDate) elDate.textContent = d.date;
 
-    // 首次加载时填充输入框（阈值）
+    // 无论是否休眠，首次加载都要填充阈值输入框
     if(firstLoad){
       if (d.tH !== undefined) document.getElementById('in_th').value = d.tH;
       if (d.tL !== undefined) document.getElementById('in_tl').value = d.tL;
       if (d.hH !== undefined) document.getElementById('in_hh').value = d.hH;
       if (d.hL !== undefined) document.getElementById('in_hl').value = d.hL;
       firstLoad = false;
+    }
+
+    // 根据设备是否处于休眠状态(isIdle)更新 UI
+    if(d.isIdle) {
+      if(elTemp) elTemp.style.opacity = "0.2";
+      if(elHum) elHum.style.opacity = "0.2";
+      if(elTime) { elTime.style.color = "var(--muted)"; elTime.textContent = "待机休眠中..."; }
+    } else {
+      if(elTemp) { elTemp.style.opacity = "1"; elTemp.textContent = d.temp; }
+      if(elHum) { elHum.style.opacity = "1"; elHum.textContent = d.hum; }
+      if(elTime) { elTime.style.color = "var(--text)"; elTime.textContent = d.time; }
+      if(elDate) elDate.textContent = d.date;
     }
   }catch(e){
     console.log("Fetch error", e);
@@ -304,27 +309,54 @@ void IRAM_ATTR touchISR() {
   if (xHigherPriorityTaskWoken == pdTRUE) portYIELD_FROM_ISR();
 }
 
-void enterDeepSleep() {
-  detachInterrupt(digitalPinToInterrupt(TOUCH_PIN));
-
+// 新增：进入软休眠
+void enterLowPower() {
+  if (isLowPowerMode) return;
+  isLowPowerMode = true;
+  
   if (displayMutex && xSemaphoreTake(displayMutex, portMAX_DELAY) == pdTRUE) {
     display.clearDisplay();
     display.setCursor(20, 25);
     display.setTextSize(2);
-    display.println("SLEEPING");
+    display.println("STANDBY");
     display.display();
     xSemaphoreGive(displayMutex);
   }
-  delay(500);
-  display.ssd1306_command(SSD1306_DISPLAYOFF);
+  delay(600); // 留出时间给用户看提示
+  
+  if (displayMutex && xSemaphoreTake(displayMutex, portMAX_DELAY) == pdTRUE) {
+    display.ssd1306_command(SSD1306_DISPLAYOFF); // 关屏极大地节省电流
+    xSemaphoreGive(displayMutex);
+  }
+  
+  WiFi.setSleep(true); // 启用 WiFi Modem Sleep
+}
 
-  // 睡前礼貌断开 Wi-Fi，让路由器释放连接状态，避免唤醒后 TCP 丢包卡顿
-  WiFi.disconnect(true);
-  WiFi.mode(WIFI_OFF);
-  delay(100); 
+// 新增：退出软休眠
+void exitLowPower() {
+  if (!isLowPowerMode) return;
+  isLowPowerMode = false;
+  
+  // 恢复 WiFi 性能
+  WiFi.setSleep(false);
+  
+  // 唤醒屏幕
+  if (displayMutex && xSemaphoreTake(displayMutex, portMAX_DELAY) == pdTRUE) {
+    display.ssd1306_command(SSD1306_DISPLAYON);
+    display.clearDisplay();
+    display.setCursor(30, 28);
+    display.setTextSize(1);
+    display.print("Waking up...");
+    display.display();
+    xSemaphoreGive(displayMutex);
+  }
 
-  esp_deep_sleep_enable_gpio_wakeup(1ULL << TOUCH_PIN, ESP_GPIO_WAKEUP_GPIO_HIGH);
-  esp_deep_sleep_start();
+  // 关键：重置自动休眠的相关参考点
+  lastChangeTime = millis(); 
+  lastStableTemp = globalTemp; // 以当前值为新基准，防止唤醒后立即又满足自动休眠条件
+  lastStableHum = globalHum;
+
+  //Serial.println("<<< 系统已唤醒");
 }
 
 // ================== FreeRTOS 任务 ==================
@@ -332,43 +364,48 @@ void enterDeepSleep() {
 void touchTask(void* pvParameters) {
   for (;;) {
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-    vTaskDelay(pdMS_TO_TICKS(20)); // 简单防抖
+    vTaskDelay(pdMS_TO_TICKS(20)); // 防抖
 
     if (digitalRead(TOUCH_PIN) == HIGH) {
+      // --- 关键修改：重置自动休眠计时器 ---
+      lastChangeTime = millis(); 
+      
       uint32_t pressTime = millis();
       bool isLongPress = false;
 
       while (digitalRead(TOUCH_PIN) == HIGH) {
-        if (millis() - pressTime > 1500) { // 设定长按时间为 1.5 秒
+        if (millis() - pressTime > 1500) {
           isLongPress = true;
           break; 
         }
-        vTaskDelay(pdMS_TO_TICKS(20)); // 让出 CPU 避免看门狗复位
+        vTaskDelay(pdMS_TO_TICKS(20)); 
       }
 
       if (isLongPress) {
-        // 【长按逻辑：休眠】
-        while (digitalRead(TOUCH_PIN) == HIGH) {
-          vTaskDelay(pdMS_TO_TICKS(50));
-        }
-        enterDeepSleep();
-      } else {
-        // 【短按逻辑：切换页面】
-        currentMode = (currentMode == REALTIME_MODE) ? ANALYSIS_MODE : REALTIME_MODE;
+        // 【长按：手动强制切换】
+        while (digitalRead(TOUCH_PIN) == HIGH) vTaskDelay(pdMS_TO_TICKS(50));
         
-        // 强制立即刷新屏幕，提供更快的触觉反馈
-        if (displayMutex && xSemaphoreTake(displayMutex, portMAX_DELAY) == pdTRUE) {
-            if (currentMode == ANALYSIS_MODE) {
-                drawAnalysisPage();
-            } else {
-                display.clearDisplay();
-                display.setCursor(20, 28);
-                display.setTextSize(1);
-                display.print("Loading UI...");
-                display.display();
-                // 具体的实时数据将在 sensorTask 下一个1秒周期内迅速画出
-            }
+        if (isLowPowerMode) exitLowPower();
+        else enterLowPower();
+        
+      } else {
+        // 【短按】
+        if (isLowPowerMode) {
+          // 如果处于休眠状态，短按直接唤醒
+          exitLowPower();
+          Serial.println(">>> 手动触摸唤醒");
+        } else {
+          // 如果已经是清醒状态，短按切换显示模式
+          currentMode = (currentMode == REALTIME_MODE) ? ANALYSIS_MODE : REALTIME_MODE;
+          
+          // 立即刷新屏幕反馈
+          if (displayMutex && xSemaphoreTake(displayMutex, portMAX_DELAY) == pdTRUE) {
+            display.clearDisplay();
+            display.setCursor(20, 28);
+            display.print(currentMode == ANALYSIS_MODE ? "Switching to Chart" : "Switching to RT");
+            display.display();
             xSemaphoreGive(displayMutex);
+          }
         }
       }
     }
@@ -379,7 +416,7 @@ void touchTask(void* pvParameters) {
 void ledTask(void* pvParameters) {
   bool state = LOW;
   for (;;) {
-    if (alarmActive) {
+    if (alarmActive && !isLowPowerMode) { // 休眠时不闪报警灯（根据需求可改）
       state = !state;
       digitalWrite(LED_PIN, state ? HIGH : LOW);
       vTaskDelay(pdMS_TO_TICKS(200));
@@ -392,7 +429,7 @@ void ledTask(void* pvParameters) {
 
 void connectWiFiAndSyncTime() {
   WiFi.mode(WIFI_STA);
-  WiFi.setSleep(false);
+  WiFi.setSleep(false); // 启动时保持最高性能
   WiFi.begin(ssid, password);
   uint8_t retry = 0;
   while (WiFi.status() != WL_CONNECTED && retry < 20) {
@@ -419,18 +456,18 @@ void connectWiFiAndSyncTime() {
       json += "\"tH\":" + String(threshHighT, 1) + ",";
       json += "\"tL\":" + String(threshLowT, 1) + ",";
       json += "\"hH\":" + String(threshHighH, 1) + ",";
-      json += "\"hL\":" + String(threshLowH, 1);
+      json += "\"hL\":" + String(threshLowH, 1) + ",";
+      // 传递当前设备的休眠状态给前端
+      json += "\"isIdle\":" + String(isLowPowerMode ? "true" : "false"); 
       json += "}";
       server.send(200, "application/json", json);
     });
 
-    // 新增 /set 路径，接收网页发来的新参数
     server.on("/set", HTTP_GET, []() {
       if (server.hasArg("th")) threshHighT = server.arg("th").toFloat();
       if (server.hasArg("tl")) threshLowT  = server.arg("tl").toFloat();
       if (server.hasArg("hh")) threshHighH = server.arg("hh").toFloat();
       if (server.hasArg("hl")) threshLowH  = server.arg("hl").toFloat();
-      
       server.send(200, "text/plain", "OK");
     });
     server.begin();
@@ -475,30 +512,13 @@ void webServerTask(void* pvParameters) {
 void sensorTask(void* pvParameters) {
   TickType_t lastWake = xTaskGetTickCount();
   const TickType_t period = pdMS_TO_TICKS(1000);
+
   for (;;) {
     vTaskDelayUntil(&lastWake, period);
 
     float t = sht31.readTemperature();
     float h = sht31.readHumidity();
 
-    if (!isnan(t) && !isnan(h)) {
-        globalTemp = t;
-        globalHum = h;
-        // 全维度报警判断：任一条件不满足即触发
-        alarmActive = (t > threshHighT || t < threshLowT || 
-                  h > threshHighH || h < threshLowH);
-
-        // 核心更新：将数据推入数据分析的环形缓冲区
-        tempHistory[bufferIndex] = t;
-        humHistory[bufferIndex] = h;
-        bufferIndex++;
-        if (bufferIndex >= BUFFER_SIZE) {
-            bufferIndex = 0;
-            bufferFull = true;
-        }
-    }
-
-    // 时间处理与 SD 卡写入逻辑保持不变...
     time_t now = time(NULL);
     struct tm timeinfo;
     char timeStamp[20] = "--:--:--";
@@ -509,18 +529,57 @@ void sensorTask(void* pvParameters) {
         strftime(hhmm, sizeof(hhmm), "%H:%M", &timeinfo);
       }
     } else {
-      snprintf(timeStamp, sizeof(timeStamp), "ms:%lu", millis());
+      snprintf(timeStamp, sizeof(timeStamp), "ms:%lu", (unsigned long)millis());
     }
 
+    if (!isnan(t) && !isnan(h)) {
+      globalTemp = t;
+      globalHum = h;
+
+      // --- 自动休眠/唤醒核心逻辑 ---
+      float diffT = fabsf(t - lastStableTemp);
+      float diffH = fabsf(h - lastStableHum);
+
+      if (lastChangeTime == 0) lastChangeTime = millis();
+
+      if (diffT >= 1.0f || diffH >= 1.0f) {
+        // 检测到变化 -> 活跃
+        lastStableTemp = t;
+        lastStableHum = h;
+        lastChangeTime = millis();
+
+        if (isLowPowerMode) {
+          exitLowPower(); // 自动唤醒
+          //Serial.println(">>> 检测到环境变化，自动唤醒");
+        }
+      } else {
+        // 数据稳定，检查是否进入软休眠
+        if (!isLowPowerMode && (millis() - lastChangeTime > AUTO_SLEEP_TIMEOUT)) {
+          // 只有在 30 秒内 既没有数据大幅波动，也没有人摸过按键，才准休眠
+          enterLowPower();
+          //Serial.println(">>> 环境长期稳定，自动进入节能模式");
+        }
+      }
+      // ----------------------------
+
+      // 报警逻辑
+      alarmActive = (t > threshHighT || t < threshLowT || h > threshHighH || h < threshLowH);
+
+      // 环形缓冲区更新
+      tempHistory[bufferIndex] = t;
+      humHistory[bufferIndex] = h;
+      bufferIndex = (bufferIndex + 1) % BUFFER_SIZE;
+      if (bufferIndex == 0) bufferFull = true;
+    }
+
+    // SD 卡文件创建（使用 epoch 秒命名文件）和写入
     if (sdInitialized && !logStarted) {
       char fname[32];
       if (now >= 1000000000) {
-        // 使用从 1970-01-01 00:00:00 UTC 起的秒数作为文件名
-        snprintf(fname, sizeof(fname), "%lu.csv", (unsigned long)now);
+        snprintf(fname, sizeof(fname), "/log_%lu.csv", (unsigned long)now);
       } else {
-        snprintf(fname, sizeof(fname), "%lu.csv", (unsigned long)millis());
+        snprintf(fname, sizeof(fname), "/log_%lu.csv", (unsigned long)millis());
       }
-
       logFileName = String(fname);
       File f = SD.open(logFileName.c_str(), FILE_WRITE);
       if (f) {
@@ -540,14 +599,11 @@ void sensorTask(void* pvParameters) {
       }
     }
 
-    // 根据当前模式更新屏幕
-    if (!isnan(t) && !isnan(h)) {
+    // 屏幕刷新（休眠模式下跳过）
+    if (!isLowPowerMode && !isnan(t) && !isnan(h)) {
       if (displayMutex && xSemaphoreTake(displayMutex, portMAX_DELAY) == pdTRUE) {
-        if (currentMode == REALTIME_MODE) {
-          drawRealTimePage(t, h, hhmm);
-        } else if (currentMode == ANALYSIS_MODE) {
-          drawAnalysisPage();
-        }
+        if (currentMode == REALTIME_MODE) drawRealTimePage(t, h, hhmm);
+        else if (currentMode == ANALYSIS_MODE) drawAnalysisPage();
         xSemaphoreGive(displayMutex);
       }
     }
@@ -573,42 +629,6 @@ void setup() {
   display.display();
 
   displayMutex = xSemaphoreCreateMutex();
-
-  // 修复后的深度休眠唤醒逻辑
-  if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_GPIO) {
-    pinMode(TOUCH_PIN, INPUT_PULLDOWN);
-
-    uint32_t wakeTime = millis();
-    bool validWakeup = true;
-    
-    // 伪长按确认机制 (1.5秒)
-    while (millis() - wakeTime < 1500) { 
-      if (digitalRead(TOUCH_PIN) == LOW) {
-        validWakeup = false; 
-        break; 
-      }
-      delay(20);
-    }
-
-    if (!validWakeup) {
-      // 误触则立刻滚回去继续睡
-      esp_deep_sleep_enable_gpio_wakeup(1ULL << TOUCH_PIN, ESP_GPIO_WAKEUP_GPIO_HIGH);
-      esp_deep_sleep_start();
-    }
-
-    // 确认是人为长按唤醒，显示启动画面
-    if (xSemaphoreTake(displayMutex, portMAX_DELAY) == pdTRUE) {
-      display.clearDisplay();
-      display.setCursor(10, 20);
-      display.setTextSize(1);
-      display.println("Waking up...");
-      display.display();
-      xSemaphoreGive(displayMutex);
-    }
-    
-    // 等待手指松开
-    while(digitalRead(TOUCH_PIN) == HIGH) delay(10);
-  }
 
   if (!sht31.begin(SHT31_ADDR)) {
     Serial.println("Couldn't find SHT31");
