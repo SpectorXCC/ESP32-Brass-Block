@@ -344,9 +344,9 @@ void exitLowPower() {
   if (displayMutex && xSemaphoreTake(displayMutex, portMAX_DELAY) == pdTRUE) {
     display.ssd1306_command(SSD1306_DISPLAYON);
     display.clearDisplay();
-    display.setCursor(30, 28);
-    display.setTextSize(1);
-    display.print("Waking up...");
+    display.setCursor(10, 28);
+    display.setTextSize(2);
+    display.print("WAKING UP");
     display.display();
     xSemaphoreGive(displayMutex);
   }
@@ -624,6 +624,7 @@ void setup() {
   display.setTextColor(SSD1306_WHITE);
   display.setTextSize(1);
   display.setCursor(0,0);
+  display.println("Ciallo World!");
   display.println("Init Systems...");
   display.display();
 
@@ -646,6 +647,11 @@ void setup() {
   xTaskCreate(timeSyncTask, "TimeSync", 4096, NULL, 1, &timeSyncTaskHandle);
   xTaskCreate(sensorTask, "SensorTask", 4096, NULL, 1, &sensorTaskHandle);
   xTaskCreate(webServerTask, "WebTask", 4096, NULL, 1, &webTaskHandle);
+  // ================== 系统启动完成 ==================
+  //Serial.println("\n**************************************");
+  //Serial.println("Ciallo World! (∠・ω< )⌒☆");
+  //Serial.println("Embedded System Initialized Successfully.");
+  //Serial.println("**************************************\n");
 }
 
 void loop() {
