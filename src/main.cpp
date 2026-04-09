@@ -515,11 +515,12 @@ void sensorTask(void* pvParameters) {
     if (sdInitialized && !logStarted) {
       char fname[32];
       if (now >= 1000000000) {
-        if (localtime_r(&now, &timeinfo)) strftime(fname, sizeof(fname), "/log_%Y%m%d_%H%M%S.csv", &timeinfo);
-        else snprintf(fname, sizeof(fname), "/log_%lu.csv", millis());
+        // 使用从 1970-01-01 00:00:00 UTC 起的秒数作为文件名
+        snprintf(fname, sizeof(fname), "%lu.csv", (unsigned long)now);
       } else {
-        snprintf(fname, sizeof(fname), "/log_%lu.csv", millis());
+        snprintf(fname, sizeof(fname), "%lu.csv", (unsigned long)millis());
       }
+
       logFileName = String(fname);
       File f = SD.open(logFileName.c_str(), FILE_WRITE);
       if (f) {
