@@ -213,6 +213,8 @@ body{ background: radial-gradient(900px 600px at 20% 10%, rgba(120,120,255,0.12)
 .v-input { background:none; border:none; border-bottom:1px solid var(--border); color:white; width:50px; text-align:right; font-weight:600; outline:none; }
 #btn-save { margin-top:15px; width:100%; padding:10px; border-radius:12px; background:rgba(255,255,255,0.1); color:white; border:1px solid var(--border); cursor:pointer; transition:0.3s; }
 #btn-save:hover { background:rgba(255,255,255,0.2); }
+#btn-power { margin-top:10px; width:100%; padding:10px; border-radius:12px; background:rgba(255,255,255,0.1); color:white; border:1px solid var(--border); cursor:pointer; transition:0.3s; }
+#btn-power:hover { background:rgba(255,255,255,0.2); }
 </style>
 </head>
 <body>
@@ -234,6 +236,7 @@ body{ background: radial-gradient(900px 600px at 20% 10%, rgba(120,120,255,0.12)
         <div class="kv"><div class="k">湿度上限</div><input type="number" id="in_hh" class="v-input"></div>
         <div class="kv"><div class="k">湿度下限</div><input type="number" id="in_hl" class="v-input"></div>
         <button onclick="save()" id="btn-save">应用更改</button>
+        <button onclick="togglePower()" id="btn-power">进入低功耗</button>
       </div>
     </div>
 
@@ -242,6 +245,14 @@ body{ background: radial-gradient(900px 600px at 20% 10%, rgba(120,120,255,0.12)
 
 <script>
 let firstLoad = true;
+
+async function togglePower(){
+  try{
+    await fetch('/power?action=toggle');
+    // 小延迟后刷新状态（让设备有时间切换）
+    setTimeout(update, 300);
+  }catch(e){ console.log("Power toggle error", e); }
+}
 
 async function update(){
   try{
@@ -252,6 +263,8 @@ async function update(){
     const elHum = document.getElementById('hum');
     const elTime = document.getElementById('time');
     const elDate = document.getElementById('date');
+
+    const btnPower = document.getElementById('btn-power');
 
     // 无论是否休眠，首次加载都要填充阈值输入框
     if(firstLoad){
@@ -272,6 +285,10 @@ async function update(){
       if(elHum) { elHum.style.opacity = "1"; elHum.textContent = d.hum; }
       if(elTime) { elTime.style.color = "var(--text)"; elTime.textContent = d.time; }
       if(elDate) elDate.textContent = d.date;
+    }
+    
+    if(btnPower){
+      btnPower.textContent = d.isIdle ? "退出低功耗" : "进入低功耗";
     }
   }catch(e){
     console.log("Fetch error", e);
@@ -448,19 +465,21 @@ void connectWiFiAndSyncTime() {
     //MDNS.begin(mdnsName);
     server.on("/", handleRoot);
     server.on("/data", []() {
-      String json = "{";
-      json += "\"temp\":\"" + getTempWeb() + "\",";
-      json += "\"hum\":\"" + getHumWeb() + "\",";
-      json += "\"time\":\"" + getTimeString() + "\",";
-      json += "\"date\":\"" + getDateString() + "\",";
-      json += "\"tH\":" + String(threshHighT, 1) + ",";
-      json += "\"tL\":" + String(threshLowT, 1) + ",";
-      json += "\"hH\":" + String(threshHighH, 1) + ",";
-      json += "\"hL\":" + String(threshLowH, 1) + ",";
-      // 传递当前设备的休眠状态给前端
-      json += "\"isIdle\":" + String(isLowPowerMode ? "true" : "false"); 
-      json += "}";
-      server.send(200, "application/json", json);
+    // 分配一块 256 字节的局部数组（在栈上，自动回收，无碎片）
+    char jsonBuf[256];
+    
+    // 提取出当前值，避免多次调用函数
+    float currentT = globalTemp; 
+    float currentH = globalHum;
+    
+    snprintf(jsonBuf, sizeof(jsonBuf),
+             "{\"temp\":\"%.1f °C\",\"hum\":\"%.1f %%RH\",\"time\":\"%s\",\"date\":\"%s\",\"tH\":%.1f,\"tL\":%.1f,\"hH\":%.1f,\"hL\":%.1f,\"isIdle\":%s}",
+             currentT, currentH,
+             getTimeString().c_str(), getDateString().c_str(),
+             threshHighT, threshLowT, threshHighH, threshLowH,
+             isLowPowerMode ? "true" : "false");
+
+    server.send(200, "application/json", jsonBuf);
     });
 
     server.on("/set", HTTP_GET, []() {
@@ -468,6 +487,21 @@ void connectWiFiAndSyncTime() {
       if (server.hasArg("tl")) threshLowT  = server.arg("tl").toFloat();
       if (server.hasArg("hh")) threshHighH = server.arg("hh").toFloat();
       if (server.hasArg("hl")) threshLowH  = server.arg("hl").toFloat();
+      server.send(200, "text/plain", "OK");
+    });
+
+    server.on("/power", HTTP_GET, []() {
+      if (server.hasArg("action")) {
+        String a = server.arg("action");
+        if (a == "toggle") {
+          if (isLowPowerMode) exitLowPower();
+          else enterLowPower();
+        } else if (a == "enter") {
+          enterLowPower();
+        } else if (a == "exit") {
+          exitLowPower();
+        }
+      }
       server.send(200, "text/plain", "OK");
     });
     server.begin();
@@ -542,7 +576,7 @@ void sensorTask(void* pvParameters) {
 
       if (lastChangeTime == 0) lastChangeTime = millis();
 
-      if (diffT >= 1.0f || diffH >= 1.0f) {
+      if (diffT >= 1.0f || diffH >= 2.0f) {
         // 检测到变化 -> 活跃
         lastStableTemp = t;
         lastStableHum = h;
