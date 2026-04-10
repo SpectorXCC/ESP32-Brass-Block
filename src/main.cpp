@@ -294,7 +294,7 @@ async function save(){
 }
 
 update();
-setInterval(update, 2000);
+setInterval(update, 200);
 </script>
 </body>
 </html>
