@@ -254,7 +254,7 @@ body{ background: radial-gradient(900px 600px at 20% 10%, rgba(120,120,255,0.12)
     </div>
 
     <div class="panel">
-      <div class="title">预设中心 (Setup)</div>
+      <div class="title">Setup</div>
       <div style="margin-top:10px;">
         <div class="kv"><div class="k">温度上限</div><input type="number" id="in_th" class="v-input"></div>
         <div class="kv"><div class="k">温度下限</div><input type="number" id="in_tl" class="v-input"></div>
@@ -680,6 +680,12 @@ void setup() {
   if(!display.begin(SSD1306_SWITCHCAPVCC)) for(;;);
   display.setRotation(2);
 
+  // ================== 黑科技：后台异步连接 WiFi ==================
+  // 在显示 Logo 之前，直接向底层驱动发送连接指令，不阻塞进程
+  Serial.println("Starting WiFi connection in background...");
+  WiFi.begin(ssid, password);
+  // ==============================================================
+
   // ================== 显示自定义启动 Logo ==================
   display.clearDisplay();
   
@@ -692,11 +698,21 @@ void setup() {
   delay(2500); 
   // =========================================================
 
+  // Logo 展示完，进入系统初始化反馈界面
   display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
   display.setTextSize(1);
   display.setCursor(0,0);
   display.println("Ciallo World!");
+
+  // 【新增】：根据这 2.5 秒的“白嫖”成果，给用户视觉反馈
+  if (WiFi.status() == WL_CONNECTED) {
+    display.println("WiFi Connected!");
+    //Serial.println("WiFi connected during logo display!");
+  } else {
+    display.println("Connecting WiFi...");
+  }
+  
   display.println("Init Systems...");
   display.display();
 
@@ -704,14 +720,14 @@ void setup() {
 
   if (!sht31.begin(SHT31_ADDR)) {
     Serial.println("Couldn't find SHT31");
-    for(;;) vTaskDelay(portMAX_DELAY);
+    for(;;) vTaskDelay(portMAX_DELAY); // 死循环保护
   }
 
   pinMode(TOUCH_PIN, INPUT_PULLDOWN);
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
 
-  // 挂载任务
+  // 挂载所有 FreeRTOS 任务
   xTaskCreate(ledTask, "LedTask", 1024, NULL, 2, &ledTaskHandle);
   xTaskCreate(touchTask, "TouchTask", 2048, NULL, 2, &touchTaskHandle);
   attachInterrupt(digitalPinToInterrupt(TOUCH_PIN), touchISR, RISING);
