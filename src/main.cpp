@@ -9,6 +9,7 @@
 #include <SD.h>
 #include <WebServer.h>
 #include <ESPmDNS.h>
+#include "CHD_logo.h"
 
 // ================== 引脚定义 ==================
 #define SCLK 8
@@ -192,8 +193,20 @@ void handleRoot() {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ESP32 温湿度监测系统</title>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap" rel="stylesheet">
+<link href="https://fonts.lug.ustc.edu.cn/css2?family=Inter:wght@300;400;600;700&display=swap" rel="stylesheet">
 <style>
+.site-logo {
+    position: absolute;
+    top: 20px;
+    left: 20px;
+    width: 121px;
+    height: auto;
+    z-index: 999;
+    filter: drop-shadow(0 0 8px rgba(255,255,255,0.2));
+}
+@media(max-width: 600px) {
+    .site-logo { width: 80px; top: 10px; left: 10px; }
+}
 :root{ --glass: rgba(255,255,255,0.045); --glass2: rgba(255,255,255,0.07); --border: rgba(255,255,255,0.08); --text: rgba(255,255,255,0.88); --muted: rgba(255,255,255,0.55); }
 * { box-sizing: border-box; }
 html,body{ height:100%; margin:0; font-family: Inter, system-ui, sans-serif; color: var(--text); }
@@ -204,7 +217,18 @@ body{ background: radial-gradient(900px 600px at 20% 10%, rgba(120,120,255,0.12)
 .panel{ padding:18px; border-radius:18px; background: rgba(255,255,255,0.04); border:1px solid var(--border); transition: 0.3s; }
 .title{ font-size:.85rem; letter-spacing:.08em; text-transform:uppercase; color:var(--muted); }
 .temp{ margin-top:10px; font-size:clamp(4.2rem,9vw,6.8rem); font-weight:700; opacity:.92; transition: 0.3s; }
-.chip{ display:inline-block; margin-top:12px; padding:8px 12px; border-radius:999px; font-weight:600; background: rgba(255,255,255,0.05); border:1px solid var(--border); opacity:.85; transition: 0.3s; }
+.chip { 
+  display: inline-block; 
+  margin-top: 12px; 
+  padding: 15px 30px;
+  font-size: 2.2rem;
+  font-weight: 700;
+  border-radius: 16px;
+  background: rgba(255,255,255,0.08);
+  border: 1px solid var(--border); 
+  opacity: .92; 
+  transition: 0.3s; 
+}
 .time{ margin-top:14px; font-size:clamp(2.1rem,5vw,3rem); font-weight:600; opacity:.85; transition: 0.3s; }
 .date{ margin-top:8px; font-size:1rem; color:var(--muted); }
 .kv{ display:flex; justify-content:space-between; padding:10px 12px; margin-top:10px; border-radius:14px; background: rgba(255,255,255,0.04); border:1px solid var(--border); }
@@ -218,6 +242,7 @@ body{ background: radial-gradient(900px 600px at 20% 10%, rgba(120,120,255,0.12)
 </style>
 </head>
 <body>
+<img src="https://chd.edu.cn/images/logo.png" class="site-logo" alt="Logo">
 <div class="wrap">
   <div class="card">
     <div class="panel" id="main-panel">
@@ -654,6 +679,19 @@ void setup() {
 
   if(!display.begin(SSD1306_SWITCHCAPVCC)) for(;;);
   display.setRotation(2);
+
+  // ================== 显示自定义启动 Logo ==================
+  display.clearDisplay();
+  
+  // drawBitmap(X坐标, Y坐标, 数据数组, 宽度, 高度, 颜色)
+  display.drawBitmap(0, 5, CHD_logo, 128, 43, SSD1306_WHITE);
+  
+  display.display();
+  
+  // 停留展示 2~3 秒，让开机充满仪式感
+  delay(2500); 
+  // =========================================================
+
   display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
   display.setTextSize(1);
